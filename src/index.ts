@@ -5,7 +5,7 @@ async function main() {
   console.log('🚀 Initializing Fitness Bot Vault Connections...');
   VaultManager.ensureDirectories();
 
-  // Launch the Telegram bot listener layer
+  // Start the persistent Telegram bot polling listener
   startTelegramBot();
 }
 
