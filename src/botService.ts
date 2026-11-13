@@ -57,7 +57,7 @@ bot.command('history', async (ctx) => {
   const lastMonth = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   
   const result = BotController.handleGetLogHistory(lastMonth, today);
-  await ctx.reply(result.report || result.message, { parse_mode: 'Markdown' });
+  await ctx.reply(result.report || result.message || 'No workout logs found.', { parse_mode: 'Markdown' });
 });
 
 export function startTelegramBot() {
