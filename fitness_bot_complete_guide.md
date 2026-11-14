@@ -2,6 +2,7 @@
 
 This guide covers everything required to set up, code, configure, and run your personal local fitness Telegram bot on a Windows workstation. The bot communicates via **Telegraf Long Polling** (requiring no public web server or PaaS), interacts directly with your local Obsidian vault (`H:/My Drive/Rans-Vault`), and uses `gemini-3.5-flash-lite` for AI-powered natural language queries.
 
+* **Reference Documentation:** [View Functional Specification PDF](./Functional%20Spec.pdf)
 ---
 
 ## Prerequisites
