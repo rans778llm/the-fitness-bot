@@ -1,44 +1,43 @@
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
-import dotenv from 'dotenv';
-dotenv.config();
-const VAULT_ROOT = process.env.OBSIDIAN_VAULT_PATH || '';
-const SUBDIR = process.env.FITNESS_BOT_SUBDIR || 'Self Projects/The Fitness Bot';
-const BASE_PATH = path.join(VAULT_ROOT, SUBDIR);
+const BASE_PATH = 'H:/My Drive/Rans-Vault/Self Projects/The Fitness Bot';
 export class VaultManager {
     static getFullPath(relativePath) {
         return path.join(BASE_PATH, relativePath);
     }
     static ensureDirectories() {
-        ['Attachments', 'Equipment', 'Exercises', 'Plans', 'Logs'].forEach(dir => {
-            const dirPath = path.join(BASE_PATH, dir);
-            if (!fs.existsSync(dirPath)) {
-                fs.mkdirSync(dirPath, { recursive: true });
+        const dirs = ['Attachments', 'Equipment', 'Exercises', 'Logs', 'Plans'];
+        for (const dir of dirs) {
+            const fullPath = path.join(BASE_PATH, dir);
+            if (!fs.existsSync(fullPath)) {
+                fs.mkdirSync(fullPath, { recursive: true });
             }
-        });
+        }
     }
-    static saveEquipmentNote(name, category, imageFileName, exercises) {
+    static saveEquipmentNote(equipmentName, category, imageName, exercises) {
         this.ensureDirectories();
-        const filePath = path.join(BASE_PATH, 'Equipment', `${name}.md`);
+        const filePath = path.join(BASE_PATH, 'Equipment', `${equipmentName}.md`);
         const data = {
             type: 'equipment',
-            name: name,
+            name: equipmentName,
             category: category,
-            image: `[[${imageFileName}]]`,
-            date_added: new Date().toISOString().split('T')[0],
+            image: `[[Attachments/${imageName}]]`,
             exercises: exercises.map(ex => `[[${ex}]]`)
         };
-        const exerciseListMarkdown = exercises.map(ex => `* [[${ex}]] — Target Muscles`).join('\n');
-        const content = `# ${name}\n\n![[${imageFileName}]]\n\n## Supported Exercises\n${exerciseListMarkdown}\n`;
+        const exerciseLinks = exercises.map(ex => `- [[${ex}]]`).join('\n');
+        const content = `# ${equipmentName}\n\n**Category:** ${category}\n\n![[Attachments/${imageName}]]\n\n## Associated Exercises\n${exerciseLinks}\n`;
         const fileContent = matter.stringify(content, data);
         fs.writeFileSync(filePath, fileContent, 'utf8');
     }
-    static saveExerciseNote(exerciseName, equipmentName, primaryMuscles) {
+    static saveExerciseNote(exerciseName, equipmentName, primaryMuscles, instructions = '', youtubeUrl = '') {
         this.ensureDirectories();
         const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
         if (fs.existsSync(filePath))
             return;
+        const finalYouTubeUrl = youtubeUrl && youtubeUrl.startsWith('http')
+            ? youtubeUrl
+            : `https://www.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' exercise form')}`;
         const data = {
             type: 'exercise',
             name: exerciseName,
@@ -46,104 +45,116 @@ export class VaultManager {
             primary_muscles: primaryMuscles,
             last_weight: null,
             weight_unit: 'kg',
-            last_performed: null
+            last_performed: null,
+            youtube_link: finalYouTubeUrl
         };
-        const content = `# ${exerciseName}\n\n**Equipment:** [[${equipmentName}]]  \n**Target Muscles:** ${primaryMuscles.join(', ')}\n\n## Weight Progression Log\n| Date | Weight (kg) | Session Log |\n| :--- | :---: | :--- |\n`;
+        const content = `# ${exerciseName}\n\n**Equipment:** [[${equipmentName}]]  \n**Target Muscles:** ${primaryMuscles.join(', ')}\n\n## Instructions\n${instructions || 'Perform with controlled movement and proper form.'}\n\n## Video Guide\n* [Watch Most Viewed Tutorial on YouTube](${finalYouTubeUrl})\n\n## Weight Progression Log\n| Date | Weight (kg) | Session Log |\n| :--- | :---: | :--- |\n`;
         const fileContent = matter.stringify(content, data);
         fs.writeFileSync(filePath, fileContent, 'utf8');
-    }
-    static updateExerciseWeight(exerciseName, weight, dateStr, logFileName) {
-        const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
-        if (!fs.existsSync(filePath))
-            return;
-        const fileRaw = fs.readFileSync(filePath, 'utf8');
-        const parsed = matter(fileRaw);
-        parsed.data.last_weight = weight;
-        parsed.data.last_performed = dateStr;
-        const newRow = `| ${dateStr} | ${weight} | [[${logFileName}]] |`;
-        const updatedContent = parsed.content.trim() + `\n${newRow}\n`;
-        fs.writeFileSync(filePath, matter.stringify(updatedContent, parsed.data), 'utf8');
     }
     static saveWeeklyPlan(daysPerWeek, hoursPerDay, planMarkdown) {
         this.ensureDirectories();
         const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
         const data = {
-            type: 'weekly_plan',
-            status: 'active',
-            created_at: new Date().toISOString().split('T')[0],
+            type: 'plan',
             days_per_week: daysPerWeek,
             hours_per_day: hoursPerDay,
             current_day_index: 1,
             total_sessions_completed: 0
         };
-        const fileContent = matter.stringify(`\n# Active Weekly Workout Plan\n\n${planMarkdown}`, data);
+        const fileContent = matter.stringify(planMarkdown, data);
         fs.writeFileSync(filePath, fileContent, 'utf8');
     }
     static getActivePlan() {
         const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
         if (!fs.existsSync(filePath))
-            throw new Error('No active weekly plan found.');
-        const fileRaw = fs.readFileSync(filePath, 'utf8');
-        return matter(fileRaw);
+            throw new Error('No active weekly plan found. Create one first.');
+        const raw = fs.readFileSync(filePath, 'utf8');
+        return matter(raw);
     }
-    static updatePlanIndex(newIndex, sessionsCompleted) {
+    static updatePlanIndex(nextDayIndex, sessionsCompleted) {
         const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
-        const { data, content } = this.getActivePlan();
-        data.current_day_index = newIndex;
-        data.total_sessions_completed = sessionsCompleted;
-        fs.writeFileSync(filePath, matter.stringify(content, data), 'utf8');
+        if (!fs.existsSync(filePath))
+            return;
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const parsed = matter(raw);
+        parsed.data.current_day_index = nextDayIndex;
+        parsed.data.total_sessions_completed = sessionsCompleted;
+        const updatedContent = matter.stringify(parsed.content, parsed.data);
+        fs.writeFileSync(filePath, updatedContent, 'utf8');
     }
     static createWorkoutLog(dateStr, dayIndex, exercises) {
         this.ensureDirectories();
-        const logFileName = `${dateStr}-Workout-Log`;
-        const filePath = path.join(BASE_PATH, 'Logs', `${logFileName}.md`);
+        const fileName = `${dateStr}-Day-${dayIndex}.md`;
+        const filePath = path.join(BASE_PATH, 'Logs', fileName);
         const data = {
             type: 'workout_log',
             date: dateStr,
-            plan_ref: '[[Active-Weekly-Plan]]',
-            plan_day_index: dayIndex,
-            status: 'in_progress'
+            plan_day_index: dayIndex
         };
-        let tableRows = exercises.map((ex, idx) => `| ${idx + 1} | [[${ex.equipment}]] | [[${ex.exercise}]] | ${ex.lastWeight !== null ? ex.lastWeight + ' kg' : 'N/A'} | — | ⏳ Pending |`).join('\n');
-        const content = `# Workout Log — ${dateStr} (Day ${dayIndex})\n\n| # | Equipment | Exercise | Target Weight | Logged Weight | Status |\n| :-: | :--- | :--- | :---: | :---: | :---: |\n${tableRows}\n`;
-        fs.writeFileSync(filePath, matter.stringify(content, data), 'utf8');
-        return logFileName;
+        let tableContent = `## Workout Log - Day ${dayIndex}\n\n| Exercise | Weight (kg) |\n| :--- | :---: |\n`;
+        exercises.forEach(ex => {
+            tableContent += `| [[${ex.exercise}]] | ${ex.lastWeight ?? ''} |\n`;
+        });
+        const fileContent = matter.stringify(tableContent, data);
+        fs.writeFileSync(filePath, fileContent, 'utf8');
+        return fileName;
     }
-    static updateLogEntry(logFileName, exerciseNumber, loggedWeight) {
-        const filePath = path.join(BASE_PATH, 'Logs', `${logFileName}.md`);
+    static updateLogEntry(logFileName, exerciseNumber, weight) {
+        const filePath = path.join(BASE_PATH, 'Logs', logFileName);
         if (!fs.existsSync(filePath))
-            throw new Error(`Log file ${logFileName} not found.`);
-        const fileRaw = fs.readFileSync(filePath, 'utf8');
-        const parsed = matter(fileRaw);
+            return;
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const parsed = matter(raw);
         const lines = parsed.content.split('\n');
+        let currentRow = 0;
         const updatedLines = lines.map(line => {
-            if (line.startsWith(`| ${exerciseNumber} |`)) {
-                const parts = line.split('|').map(p => p.trim());
-                parts[5] = `${loggedWeight} kg`;
-                parts[6] = '✅ Completed';
-                return `| ${parts.slice(1, -1).join(' | ')} |`;
+            if (line.startsWith('| [[')) {
+                currentRow++;
+                if (currentRow === exerciseNumber) {
+                    const parts = line.split('|');
+                    if (parts.length >= 3) {
+                        parts[2] = ` ${weight} `;
+                        return parts.join('|');
+                    }
+                }
             }
             return line;
         });
-        fs.writeFileSync(filePath, matter.stringify(updatedLines.join('\n'), parsed.data), 'utf8');
+        parsed.content = updatedLines.join('\n');
+        const updatedFile = matter.stringify(parsed.content, parsed.data);
+        fs.writeFileSync(filePath, updatedFile, 'utf8');
+    }
+    static updateExerciseWeight(exerciseName, weight, dateStr, logFileName) {
+        const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
+        if (!fs.existsSync(filePath))
+            return;
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const parsed = matter(raw);
+        parsed.data.last_weight = weight;
+        parsed.data.last_performed = dateStr;
+        const newRow = `| ${dateStr} | ${weight} | [[Logs/${logFileName}|Session Log]] |\n`;
+        if (!parsed.content.includes(newRow)) {
+            parsed.content += newRow;
+        }
+        const updatedFile = matter.stringify(parsed.content, parsed.data);
+        fs.writeFileSync(filePath, updatedFile, 'utf8');
     }
     static getLogsInRange(startDate, endDate) {
         const logsDir = path.join(BASE_PATH, 'Logs');
         if (!fs.existsSync(logsDir))
             return [];
-        const files = fs.readdirSync(logsDir);
-        const results = [];
+        const files = fs.readdirSync(logsDir).filter(f => f.endsWith('.md'));
+        const matchedLogs = [];
         for (const file of files) {
-            if (!file.endsWith('.md'))
-                continue;
             const filePath = path.join(logsDir, file);
             const raw = fs.readFileSync(filePath, 'utf8');
             const parsed = matter(raw);
             const logDate = parsed.data.date;
             if (logDate && logDate >= startDate && logDate <= endDate) {
-                results.push({ fileName: file.replace('.md', ''), content: parsed.content, data: parsed.data });
+                matchedLogs.push(parsed);
             }
         }
-        return results.sort((a, b) => a.data.date.localeCompare(b.data.date));
+        return matchedLogs;
     }
 }

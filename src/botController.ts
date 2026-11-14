@@ -1,13 +1,30 @@
 import { VaultManager } from './vaultManager.js';
+import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export class BotController {
   
-  static async handleGenerateExercises(imagePath: string, machineName: string, category: string, exercisesList: { name: string; muscles: string[] }[]) {
+  static async handleGenerateExercises(
+    imagePath: string, 
+    machineName: string, 
+    category: string, 
+    exercisesList: { name: string; muscles: string[]; instructions?: string; youtubeUrl?: string }[]
+  ) {
+    console.log(`[DEBUG Controller] handleGenerateExercises called for machine: "${machineName}", category: "${category}"`);
+    
     const fileName = path.basename(imagePath);
     const targetAttachmentPath = VaultManager.getFullPath(path.join('Attachments', fileName));
+    
+    if (!fs.existsSync(path.dirname(targetAttachmentPath))) {
+      fs.mkdirSync(path.dirname(targetAttachmentPath), { recursive: true });
+    }
     
     fs.copyFileSync(imagePath, targetAttachmentPath);
 
@@ -15,12 +32,19 @@ export class BotController {
     VaultManager.saveEquipmentNote(machineName, category, fileName, exerciseNames);
 
     for (const ex of exercisesList) {
-      VaultManager.saveExerciseNote(ex.name, machineName, ex.muscles);
+      VaultManager.saveExerciseNote(
+        ex.name, 
+        machineName, 
+        ex.muscles, 
+        ex.instructions || '', 
+        ex.youtubeUrl || ''
+      );
+      console.log(`[DEBUG Controller] Exercise note saved with instructions & direct YouTube link: ${ex.name}`);
     }
 
     return {
       success: true,
-      message: `Successfully registered machine **${machineName}** and generated ${exercisesList.length} exercises.`
+      message: `Successfully registered machine **${machineName}** and generated ${exercisesList.length} exercises with instructions and direct video links.`
     };
   }
 
@@ -82,9 +106,15 @@ export class BotController {
     return {
       dayIndex,
       logFileName,
-      exercises: exercisesForLog,
-      interactiveButtons: exercisesForLog.map((ex, idx) => `[${idx + 1}] Log ${ex.exercise} (Last: ${ex.lastWeight ?? 'N/A'} kg)`)
+      exercises: exercisesForLog
     };
+  }
+
+  static getLastExerciseWeight(exerciseName: string): number | null {
+    const exPath = VaultManager.getFullPath(path.join('Exercises', `${exerciseName}.md`));
+    if (!fs.existsSync(exPath)) return null;
+    const parsed = matter(fs.readFileSync(exPath, 'utf8'));
+    return typeof parsed.data.last_weight === 'number' ? parsed.data.last_weight : null;
   }
 
   static handleReport(logFileName: string, exerciseNumber: number, weight: number, exerciseName: string) {
@@ -94,7 +124,7 @@ export class BotController {
 
     return {
       success: true,
-      message: `Successfully logged ${weight} kg for **${exerciseName}**.`
+      message: `✅ Logged **${weight} kg** for **${exerciseName}**.`
     };
   }
 
@@ -109,5 +139,36 @@ export class BotController {
     }
 
     return { success: true, report: reportOutput };
+  }
+
+  private static collectVaultMarkdown(dir: string): string {
+    if (!fs.existsSync(dir)) return '';
+    let combined = '';
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        combined += this.collectVaultMarkdown(fullPath);
+      } else if (entry.name.endsWith('.md')) {
+        const text = fs.readFileSync(fullPath, 'utf8');
+        combined += `\n--- File: ${entry.name} ---\n${text}\n`;
+      }
+    }
+    return combined;
+  }
+
+  static async handleAskVault(question: string): Promise<string> {
+    const vaultContext = this.collectVaultMarkdown(VaultManager.getFullPath(''));
+    if (!vaultContext.trim()) {
+      return 'Your Fitness Bot vault directory is currently empty.';
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-flash-lite',
+      contents: [
+        `You are a concise personal fitness assistant. Answer the user's question based ONLY on their Obsidian Fitness Vault notes below.\n\n${vaultContext}\n\nUser Question: ${question}`
+      ]
+    });
+
+    return response.text || 'No relevant information found in your fitness notes.';
   }
 }
