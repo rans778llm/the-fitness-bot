@@ -1,6 +1,6 @@
 # Local Obsidian Fitness Telegram Bot — Complete Implementation Guide
 
-This guide covers everything required to set up, code, configure, and run your personal local fitness Telegram bot on a Windows workstation. The bot communicates via **Telegraf Long Polling** (requiring no public web server or PaaS), interacts directly with your local Obsidian vault (`H:/My Drive/Rans-Vault`), and uses `gemini-3.5-flash-lite` for AI-powered natural language queries.
+This guide covers everything required to set up, code, configure, and run your personal local fitness Telegram bot on a Windows workstation. The bot communicates via **Telegraf Long Polling** (requiring no public web server or PaaS), interacts directly with your local Obsidian vault (`H:/My Drive/Rans-Vault`), and uses `gemini-3.5-flash-lite` for vision analysis, smart workout split generation, and AI-powered natural language queries.
 
 * **Reference Documentation:** [View Functional Specification PDF](./Functional%20Spec.pdf)
 ---
@@ -77,7 +77,7 @@ Update your `package.json` scripts and dependencies:
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "@google/genai": "^0.1.1",
+    "@google/genai": "^3.3.0",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "gray-matter": "^4.0.3",
@@ -111,13 +111,8 @@ Handles local markdown file creation, frontmatter parsing, and folder syncing wi
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
-import dotenv from 'dotenv';
 
-dotenv.config();
-
-const VAULT_ROOT = process.env.OBSIDIAN_VAULT_PATH || '';
-const SUBDIR = process.env.FITNESS_BOT_SUBDIR || 'Self Projects/The Fitness Bot';
-const BASE_PATH = path.join(VAULT_ROOT, SUBDIR);
+const BASE_PATH = 'H:/My Drive/Rans-Vault/Self Projects/The Fitness Bot';
 
 export class VaultManager {
   static getFullPath(relativePath: string): string {
@@ -125,38 +120,42 @@ export class VaultManager {
   }
 
   static ensureDirectories(): void {
-    ['Attachments', 'Equipment', 'Exercises', 'Plans', 'Logs'].forEach(dir => {
-      const dirPath = path.join(BASE_PATH, dir);
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
+    const dirs = ['Attachments', 'Equipment', 'Exercises', 'Logs', 'Plans'];
+    for (const dir of dirs) {
+      const fullPath = path.join(BASE_PATH, dir);
+      if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
       }
-    });
+    }
   }
 
-  static saveEquipmentNote(name: string, category: string, imageFileName: string, exercises: string[]): void {
+  static saveEquipmentNote(equipmentName: string, category: string, imageName: string, exercises: string[]): void {
     this.ensureDirectories();
-    const filePath = path.join(BASE_PATH, 'Equipment', `${name}.md`);
+    const filePath = path.join(BASE_PATH, 'Equipment', `${equipmentName}.md`);
 
     const data = {
       type: 'equipment',
-      name: name,
+      name: equipmentName,
       category: category,
-      image: `[[${imageFileName}]]`,
-      date_added: new Date().toISOString().split('T')[0],
+      image: `[[Attachments/${imageName}]]`,
       exercises: exercises.map(ex => `[[${ex}]]`)
     };
 
-    const exerciseListMarkdown = exercises.map(ex => `* [[${ex}]] — Target Muscles`).join('\n');
-    const content = `# ${name}\n\n![[${imageFileName}]]\n\n## Supported Exercises\n${exerciseListMarkdown}\n`;
+    const exerciseLinks = exercises.map(ex => `- [[${ex}]]`).join('\n');
+    const content = `# ${equipmentName}\n\n**Category:** ${category}\n\n![[Attachments/${imageName}]]\n\n## Associated Exercises\n${exerciseLinks}\n`;
 
     const fileContent = matter.stringify(content, data);
     fs.writeFileSync(filePath, fileContent, 'utf8');
   }
 
-  static saveExerciseNote(exerciseName: string, equipmentName: string, primaryMuscles: string[]): void {
+  static saveExerciseNote(exerciseName: string, equipmentName: string, primaryMuscles: string[], instructions: string = '', youtubeUrl: string = ''): void {
     this.ensureDirectories();
     const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
     if (fs.existsSync(filePath)) return;
+
+    const finalYouTubeUrl = youtubeUrl && youtubeUrl.startsWith('http') 
+      ? youtubeUrl 
+      : `https://www.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' exercise form')}`;
 
     const data = {
       type: 'exercise',
@@ -165,133 +164,138 @@ export class VaultManager {
       primary_muscles: primaryMuscles,
       last_weight: null,
       weight_unit: 'kg',
-      last_performed: null
+      last_performed: null,
+      youtube_link: finalYouTubeUrl
     };
 
-    const content = `# ${exerciseName}\n\n**Equipment:** [[${equipmentName}]]  \n**Target Muscles:** ${primaryMuscles.join(', ')}\n\n## Weight Progression Log\n| Date | Weight (kg) | Session Log |\n| :--- | :---: | :--- |\n`;
+    const content = `# ${exerciseName}\n\n**Equipment:** [[${equipmentName}]]  \n**Target Muscles:** ${primaryMuscles.join(', ')}\n\n## Instructions\n${instructions || 'Perform with controlled movement and proper form.'}\n\n## Video Guide\n* [Watch Most Viewed Tutorial on YouTube](${finalYouTubeUrl})\n\n## Weight Progression Log\n| Date | Weight (kg) | Session Log |\n| :--- | :---: | :--- |\n`;
 
     const fileContent = matter.stringify(content, data);
     fs.writeFileSync(filePath, fileContent, 'utf8');
   }
 
-  static updateExerciseWeight(exerciseName: string, weight: number, dateStr: string, logFileName: string): void {
-    const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
-    if (!fs.existsSync(filePath)) return;
-
-    const fileRaw = fs.readFileSync(filePath, 'utf8');
-    const parsed = matter(fileRaw);
-
-    parsed.data.last_weight = weight;
-    parsed.data.last_performed = dateStr;
-
-    const newRow = `| ${dateStr} | ${weight} | [[${logFileName}]] |`;
-    const updatedContent = parsed.content.trim() + `\n${newRow}\n`;
-
-    fs.writeFileSync(filePath, matter.stringify(updatedContent, parsed.data), 'utf8');
-  }
-
   static saveWeeklyPlan(daysPerWeek: number, hoursPerDay: number, planMarkdown: string): void {
     this.ensureDirectories();
     const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
+
     const data = {
-      type: 'weekly_plan',
-      status: 'active',
-      created_at: new Date().toISOString().split('T')[0],
+      type: 'plan',
       days_per_week: daysPerWeek,
       hours_per_day: hoursPerDay,
       current_day_index: 1,
       total_sessions_completed: 0
     };
 
-    const fileContent = matter.stringify(`\n# Active Weekly Workout Plan\n\n${planMarkdown}`, data);
+    const fileContent = matter.stringify(planMarkdown, data);
     fs.writeFileSync(filePath, fileContent, 'utf8');
   }
 
-  static getActivePlan(): { data: any; content: string } {
+  static getActivePlan() {
     const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
-    if (!fs.existsSync(filePath)) throw new Error('No active weekly plan found.');
-    const fileRaw = fs.readFileSync(filePath, 'utf8');
-    return matter(fileRaw);
+    if (!fs.existsSync(filePath)) throw new Error('No active weekly plan found. Create one first.');
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return matter(raw);
   }
 
-  static updatePlanIndex(newIndex: number, sessionsCompleted: number): void {
+  static updatePlanIndex(nextDayIndex: number, sessionsCompleted: number): void {
     const filePath = path.join(BASE_PATH, 'Plans', 'Active-Weekly-Plan.md');
-    const { data, content } = this.getActivePlan();
-    data.current_day_index = newIndex;
-    data.total_sessions_completed = sessionsCompleted;
-    fs.writeFileSync(filePath, matter.stringify(content, data), 'utf8');
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = matter(raw);
+    parsed.data.current_day_index = nextDayIndex;
+    parsed.data.total_sessions_completed = sessionsCompleted;
+    const updatedContent = matter.stringify(parsed.content, parsed.data);
+    fs.writeFileSync(filePath, updatedContent, 'utf8');
   }
 
-  static createWorkoutLog(dateStr: string, dayIndex: number, exercises: { equipment: string; exercise: string; lastWeight: any }[]): string {
+  static createWorkoutLog(dateStr: string, dayIndex: number, exercises: { exercise: string; lastWeight: number | null }[]): string {
     this.ensureDirectories();
-    const logFileName = `${dateStr}-Workout-Log`;
-    const filePath = path.join(BASE_PATH, 'Logs', `${logFileName}.md`);
+    const fileName = `${dateStr}-Day-${dayIndex}.md`;
+    const filePath = path.join(BASE_PATH, 'Logs', fileName);
 
     const data = {
       type: 'workout_log',
       date: dateStr,
-      plan_ref: '[[Active-Weekly-Plan]]',
-      plan_day_index: dayIndex,
-      status: 'in_progress'
+      plan_day_index: dayIndex
     };
 
-    let tableRows = exercises.map((ex, idx) => 
-      `| ${idx + 1} | [[${ex.equipment}]] | [[${ex.exercise}]] | ${ex.lastWeight !== null ? ex.lastWeight + ' kg' : 'N/A'} | — | ⏳ Pending |`
-    ).join('\n');
+    let tableContent = `## Workout Log - Day ${dayIndex}\n\n| Exercise | Weight (kg) |\n| :--- | :---: |\n`;
+    exercises.forEach(ex => {
+      tableContent += `| [[${ex.exercise}]] | ${ex.lastWeight ?? ''} |\n`;
+    });
 
-    const content = `# Workout Log — ${dateStr} (Day ${dayIndex})\n\n| # | Equipment | Exercise | Target Weight | Logged Weight | Status |\n| :-: | :--- | :--- | :---: | :---: | :---: |\n${tableRows}\n`;
-
-    fs.writeFileSync(filePath, matter.stringify(content, data), 'utf8');
-    return logFileName;
+    const fileContent = matter.stringify(tableContent, data);
+    fs.writeFileSync(filePath, fileContent, 'utf8');
+    return fileName;
   }
 
-  static updateLogEntry(logFileName: string, exerciseNumber: number, loggedWeight: number): void {
-    const filePath = path.join(BASE_PATH, 'Logs', `${logFileName}.md`);
-    if (!fs.existsSync(filePath)) throw new Error(`Log file ${logFileName} not found.`);
-
-    const fileRaw = fs.readFileSync(filePath, 'utf8');
-    const parsed = matter(fileRaw);
+  static updateLogEntry(logFileName: string, exerciseNumber: number, weight: number): void {
+    const filePath = path.join(BASE_PATH, 'Logs', logFileName);
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = matter(raw);
 
     const lines = parsed.content.split('\n');
+    let currentRow = 0;
     const updatedLines = lines.map(line => {
-      if (line.startsWith(`| ${exerciseNumber} |`)) {
-        const parts = line.split('|').map(p => p.trim());
-        parts[5] = `${loggedWeight} kg`;
-        parts[6] = '✅ Completed';
-        return `| ${parts.slice(1, -1).join(' | ')} |`;
+      if (line.startsWith('| [[')) {
+        currentRow++;
+        if (currentRow === exerciseNumber) {
+          const parts = line.split('|');
+          if (parts.length >= 3) {
+            parts[2] = ` ${weight} `;
+            return parts.join('|');
+          }
+        }
       }
       return line;
     });
 
-    fs.writeFileSync(filePath, matter.stringify(updatedLines.join('\n'), parsed.data), 'utf8');
+    parsed.content = updatedLines.join('\n');
+    const updatedFile = matter.stringify(parsed.content, parsed.data);
+    fs.writeFileSync(filePath, updatedFile, 'utf8');
   }
 
-  static getLogsInRange(startDate: string, endDate: string): { fileName: string; content: string; data: any }[] {
+  static updateExerciseWeight(exerciseName: string, weight: number, dateStr: string, logFileName: string): void {
+    const filePath = path.join(BASE_PATH, 'Exercises', `${exerciseName}.md`);
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = matter(raw);
+
+    parsed.data.last_weight = weight;
+    parsed.data.last_performed = dateStr;
+
+    const newRow = `| ${dateStr} | ${weight} | [[Logs/${logFileName}|Session Log]] |\n`;
+    if (!parsed.content.includes(newRow)) {
+      parsed.content += newRow;
+    }
+
+    const updatedFile = matter.stringify(parsed.content, parsed.data);
+    fs.writeFileSync(filePath, updatedFile, 'utf8');
+  }
+
+  static getLogsInRange(startDate: string, endDate: string) {
     const logsDir = path.join(BASE_PATH, 'Logs');
     if (!fs.existsSync(logsDir)) return [];
-
-    const files = fs.readdirSync(logsDir);
-    const results = [];
+    const files = fs.readdirSync(logsDir).filter(f => f.endsWith('.md'));
+    const matchedLogs = [];
 
     for (const file of files) {
-      if (!file.endsWith('.md')) continue;
       const filePath = path.join(logsDir, file);
       const raw = fs.readFileSync(filePath, 'utf8');
       const parsed = matter(raw);
       const logDate = parsed.data.date;
-
       if (logDate && logDate >= startDate && logDate <= endDate) {
-        results.push({ fileName: file.replace('.md', ''), content: parsed.content, data: parsed.data });
+        matchedLogs.push(parsed);
       }
     }
-
-    return results.sort((a, b) => a.data.date.localeCompare(b.data.date));
+    return matchedLogs;
   }
 }
 ```
 
 ### 2. `src/botController.ts`
-Manages workout business logic and interfaces with `gemini-3.5-flash-lite` for vault queries:
+Manages workout business logic, AI-driven muscle-recovery plan generation, and vault queries via `gemini-3.5-flash-lite`:
 ```typescript
 import { VaultManager } from './vaultManager.js';
 import { GoogleGenAI } from '@google/genai';
@@ -304,11 +308,34 @@ dotenv.config();
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
+export interface ExerciseMetadata {
+  name: string;
+  muscles: string[];
+  equipment: string;
+  youtubeUrl: string;
+  lastWeight: number | null;
+}
+
+export interface GeneratedPlanDay {
+  day: number;
+  title: string;
+  exercises: ExerciseMetadata[];
+}
+
 export class BotController {
   
-  static async handleGenerateExercises(imagePath: string, machineName: string, category: string, exercisesList: { name: string; muscles: string[] }[]) {
+  static async handleGenerateExercises(
+    imagePath: string, 
+    machineName: string, 
+    category: string, 
+    exercisesList: { name: string; muscles: string[]; instructions?: string; youtubeUrl?: string }[]
+  ) {
     const fileName = path.basename(imagePath);
     const targetAttachmentPath = VaultManager.getFullPath(path.join('Attachments', fileName));
+    
+    if (!fs.existsSync(path.dirname(targetAttachmentPath))) {
+      fs.mkdirSync(path.dirname(targetAttachmentPath), { recursive: true });
+    }
     
     fs.copyFileSync(imagePath, targetAttachmentPath);
 
@@ -316,36 +343,146 @@ export class BotController {
     VaultManager.saveEquipmentNote(machineName, category, fileName, exerciseNames);
 
     for (const ex of exercisesList) {
-      VaultManager.saveExerciseNote(ex.name, machineName, ex.muscles);
+      VaultManager.saveExerciseNote(
+        ex.name, 
+        machineName, 
+        ex.muscles, 
+        ex.instructions || '', 
+        ex.youtubeUrl || ''
+      );
     }
 
     return {
       success: true,
-      message: `Successfully registered machine **${machineName}** and generated ${exercisesList.length} exercises.`
+      message: `Successfully registered machine **${machineName}** and generated ${exercisesList.length} exercises with instructions and direct video links.`
     };
   }
 
-  static handleCreateWeeklyPlan(daysPerWeek: number, hoursPerDay: number) {
+  static getAllExercisesMetadata(): ExerciseMetadata[] {
     const exercisesDir = VaultManager.getFullPath('Exercises');
-    if (!fs.existsSync(exercisesDir)) throw new Error('No exercises found in vault. Add equipment first.');
-    
-    const exerciseFiles = fs.readdirSync(exercisesDir).filter(f => f.endsWith('.md'));
-    
-    let planMarkdown = '';
-    const exercisesPerDay = Math.ceil(exerciseFiles.length / daysPerWeek);
+    if (!fs.existsSync(exercisesDir)) return [];
 
-    for (let d = 1; d <= daysPerWeek; d++) {
-      const dayExercises = exerciseFiles.slice((d - 1) * exercisesPerDay, d * exercisesPerDay);
-      planMarkdown += `## Day ${d}: Session ${d}\n`;
-      dayExercises.forEach((file, idx) => {
-        const exName = file.replace('.md', '');
-        planMarkdown += `${idx + 1}. [[${exName}]] — *Last Weight: Check Exercise Note*\n`;
+    const files = fs.readdirSync(exercisesDir).filter(f => f.endsWith('.md'));
+    return files.map(file => {
+      const exName = file.replace('.md', '');
+      const raw = fs.readFileSync(path.join(exercisesDir, file), 'utf8');
+      const parsed = matter(raw);
+
+      const muscles = Array.isArray(parsed.data.primary_muscles)
+        ? parsed.data.primary_muscles
+        : parsed.data.primary_muscles
+        ? [String(parsed.data.primary_muscles)]
+        : ['General'];
+
+      const equipment = parsed.data.equipment
+        ? String(parsed.data.equipment).replace(/\[\[|\]\]/g, '')
+        : 'Gym Equipment';
+
+      const youtubeUrl = parsed.data.youtube_link && String(parsed.data.youtube_link).startsWith('http')
+        ? String(parsed.data.youtube_link)
+        : `https://www.youtube.com/results?search_query=${encodeURIComponent(exName + ' exercise form')}`;
+
+      const lastWeight = typeof parsed.data.last_weight === 'number' ? parsed.data.last_weight : null;
+
+      return { name: exName, muscles, equipment, youtubeUrl, lastWeight };
+    });
+  }
+
+  static async handleCreateWeeklyPlan(daysPerWeek: number, hoursPerDay: number = 1): Promise<{
+    success: boolean;
+    message: string;
+    days: GeneratedPlanDay[];
+  }> {
+    const allExercises = this.getAllExercisesMetadata();
+    if (allExercises.length === 0) {
+      throw new Error('No exercises found in vault. Add equipment photos first.');
+    }
+
+    const targetExercisesPerDay = Math.max(4, Math.min(6, Math.round(hoursPerDay * 6)));
+
+    const prompt = `You are an expert strength & conditioning coach. Build a ${daysPerWeek}-day weekly workout split where each workout session takes approximately ${hoursPerDay} hour(s) (roughly ${targetExercisesPerDay} exercises per day).
+
+Available Exercises in the user's gym vault:
+${JSON.stringify(allExercises.map(e => ({ name: e.name, muscles: e.muscles, equipment: e.equipment })), null, 2)}
+
+Strict Scheduling Rules:
+1. Maximize muscle recovery: Distribute muscle groups across the ${daysPerWeek} days so each muscle gets the maximum possible rest days between sessions.
+2. Avoid repeating exercises across the week: Use unique exercises across all ${daysPerWeek} days whenever possible. ONLY repeat an exercise if there are not enough distinct exercises in the vault to fill all ${daysPerWeek} sessions (~${targetExercisesPerDay} exercises per session).
+3. Use ONLY exact exercise names from the provided list.
+
+Return ONLY a valid JSON object with this exact structure:
+{
+  "days": [
+    {
+      "day": 1,
+      "title": "Focus Area (e.g., Chest & Triceps / Upper Body)",
+      "exercises": ["Exact Exercise Name 1", "Exact Exercise Name 2"]
+    }
+  ]
+}`;
+
+    const aiResponse = await ai.models.generateContent({
+      model: 'gemini-3.5-flash-lite',
+      contents: [prompt]
+    });
+
+    const rawText = aiResponse.text?.trim() || '{}';
+    const sanitized = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const firstBrace = sanitized.indexOf('{');
+    const lastBrace = sanitized.lastIndexOf('}');
+    const jsonClean = firstBrace !== -1 && lastBrace !== -1 ? sanitized.substring(firstBrace, lastBrace + 1) : '{}';
+
+    const parsedPlan = JSON.parse(jsonClean);
+    const exerciseMap = new Map(allExercises.map(ex => [ex.name.toLowerCase(), ex]));
+
+    const structuredDays: GeneratedPlanDay[] = [];
+    let planMarkdown = '';
+
+    if (Array.isArray(parsedPlan.days) && parsedPlan.days.length > 0) {
+      for (const dayItem of parsedPlan.days) {
+        const dayNum = Number(dayItem.day) || structuredDays.length + 1;
+        const dayTitle = String(dayItem.title || `Session ${dayNum}`).trim();
+        const dayExercises: ExerciseMetadata[] = [];
+
+        for (const rawName of dayItem.exercises || []) {
+          const found = exerciseMap.get(String(rawName).trim().toLowerCase());
+          if (found) dayExercises.push(found);
+        }
+
+        if (dayExercises.length > 0) {
+          structuredDays.push({ day: dayNum, title: dayTitle, exercises: dayExercises });
+        }
+      }
+    }
+
+    if (structuredDays.length === 0) {
+      const totalNeeded = daysPerWeek * targetExercisesPerDay;
+      const pool: ExerciseMetadata[] = [];
+      while (pool.length < totalNeeded) pool.push(...allExercises);
+      for (let d = 1; d <= daysPerWeek; d++) {
+        structuredDays.push({
+          day: d,
+          title: `Session ${d}`,
+          exercises: pool.slice((d - 1) * targetExercisesPerDay, d * targetExercisesPerDay)
+        });
+      }
+    }
+
+    for (const d of structuredDays) {
+      planMarkdown += `## Day ${d.day}: ${d.title}\n`;
+      d.exercises.forEach((ex, idx) => {
+        planMarkdown += `${idx + 1}. [[${ex.name}]] (${ex.muscles.join(', ')}) — [Video Guide](${ex.youtubeUrl})\n`;
       });
       planMarkdown += `\n`;
     }
 
     VaultManager.saveWeeklyPlan(daysPerWeek, hoursPerDay, planMarkdown);
-    return { success: true, message: `Created a ${daysPerWeek}-day weekly plan (${hoursPerDay}h/day).` };
+
+    return {
+      success: true,
+      message: `Created a ${daysPerWeek}-day weekly plan (~${hoursPerDay}h/session) optimized for muscle recovery.`,
+      days: structuredDays
+    };
   }
 
   static handleTodaysPlan() {
@@ -380,11 +517,7 @@ export class BotController {
     const nextIndex = (dayIndex % daysPerWeek) + 1;
     VaultManager.updatePlanIndex(nextIndex, data.total_sessions_completed + 1);
 
-    return {
-      dayIndex,
-      logFileName,
-      exercises: exercisesForLog
-    };
+    return { dayIndex, logFileName, exercises: exercisesForLog };
   }
 
   static getLastExerciseWeight(exerciseName: string): number | null {
@@ -452,15 +585,20 @@ export class BotController {
 ```
 
 ### 3. `src/botService.ts`
-Configures Telegraf Long Polling, security middleware, interactive button handlers, and AI query routing:
+Configures Telegraf Long Polling, security middleware, `/help`, interactive `/plan` day selector (1–7 days), interactive workout logging buttons, photo vision pipeline, and AI query routing:
 ```typescript
 import { Telegraf, Markup } from 'telegraf';
 import { BotController } from './botController.js';
+import { GoogleGenAI } from '@google/genai';
+import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || '');
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 const ALLOWED_USER_ID = Number(process.env.ALLOWED_USER_ID || 0);
 
 interface PendingWeightEntry {
@@ -479,7 +617,94 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
-// 1. Today's Workout Command (/today)
+// 0. Help Command (/help)
+bot.command('help', async (ctx) => {
+  const helpMessage = `🤖 **Fitness Bot — Commands & Actions**
+
+• **Load Today's Workout** — Loads today's scheduled exercises and opens interactive buttons to log weights.
+  Example: \`/today\`
+
+• **Create Weekly Plan** — Choose 1–7 training days/week (~1h/session) to generate a muscle-recovery split with YouTube tutorial links.
+  Example: \`/plan\`
+
+• **View Workout History** — Displays all logged workouts from the last 30 days.
+  Example: \`/history\`
+
+• **Add Gym Equipment (Photo)** — Send a photo of any gym machine to identify it and auto-generate exercise notes & video links.
+  Example: *[Attach & send a photo of a gym machine]*
+
+• **Log Exercise Weight** — Tap an exercise button from \`/today\`, then reply with your weight in kg (or tap *Repeat Last*).
+  Example: \`22.5\`
+
+• **Ask Your Fitness Vault (AI)** — Send any free-text question to query your workout history, weights, and routines.
+  Example: \`What was my last weight on Cable Chest Fly?\`
+
+• **Show Help** — Displays this command reference guide.
+  Example: \`/help\``;
+
+  await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
+});
+
+// 1. Plan Creation Command (/plan) — Interactive day-count selection (1 to 7 days/week)
+bot.command('plan', async (ctx) => {
+  const dayButtons = [1, 2, 3, 4, 5, 6, 7].map(days =>
+    Markup.button.callback(`${days} ${days === 1 ? 'Day' : 'Days'}`, `create_plan|${days}`)
+  );
+
+  await ctx.reply(
+    `📅 **Create Weekly Workout Plan**\nHow many days per week do you want to train? (~1 hour per session):`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(dayButtons, { columns: 4 })
+    }
+  );
+});
+
+// 1b. Handle Plan Day-Count Selection
+bot.action(/^create_plan\|([1-7])$/, async (ctx) => {
+  const daysPerWeek = parseInt(ctx.match[1], 10);
+  await ctx.answerCbQuery(`Building ${daysPerWeek}-day plan...`);
+  await ctx.sendChatAction('typing');
+
+  try {
+    const result = await BotController.handleCreateWeeklyPlan(daysPerWeek, 1);
+
+    let output = `📅 **${daysPerWeek}-Day Weekly Workout Plan (~1h / session)**\n_Muscles distributed for maximum recovery between sessions._\n\n`;
+    for (const day of result.days) {
+      output += `*Day ${day.day}: ${day.title}*\n`;
+      day.exercises.forEach((ex, idx) => {
+        output += `${idx + 1}. [${ex.name}](${ex.youtubeUrl}) _(${ex.muscles.join(', ')})_\n`;
+      });
+      output += `\n`;
+    }
+
+    if (output.length <= 4000) {
+      await ctx.reply(output, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true }
+      });
+    } else {
+      await ctx.reply(
+        `📅 **${daysPerWeek}-Day Weekly Workout Plan (~1h / session)**\n_Muscles distributed for maximum recovery between sessions._`,
+        { parse_mode: 'Markdown' }
+      );
+      for (const day of result.days) {
+        let dayMsg = `*Day ${day.day}: ${day.title}*\n`;
+        day.exercises.forEach((ex, idx) => {
+          dayMsg += `${idx + 1}. [${ex.name}](${ex.youtubeUrl}) _(${ex.muscles.join(', ')})_\n`;
+        });
+        await ctx.reply(dayMsg, {
+          parse_mode: 'Markdown',
+          link_preview_options: { is_disabled: true }
+        });
+      }
+    }
+  } catch (error: any) {
+    await ctx.reply(`❌ Error creating plan: ${error.message}`);
+  }
+});
+
+// 2. Today's Workout Command (/today)
 bot.command('today', async (ctx) => {
   try {
     const session = BotController.handleTodaysPlan();
@@ -503,7 +728,7 @@ bot.command('today', async (ctx) => {
   }
 });
 
-// 2. Tap an Exercise Button
+// 3. Tap an Exercise Button
 bot.action(/^log\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   const [, logFileName, indexStr, exerciseName] = ctx.match;
   const exerciseNumber = parseInt(indexStr, 10);
@@ -525,7 +750,7 @@ bot.action(/^log\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
 });
 
-// 3. Repeat Last Weight Action
+// 4. Repeat Last Weight Action
 bot.action(/^repeat\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   const [, logFileName, indexStr, exerciseName] = ctx.match;
   const exerciseNumber = parseInt(indexStr, 10);
@@ -546,14 +771,14 @@ bot.action(/^repeat\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
 });
 
-// 4. Cancel Action
+// 5. Cancel Action
 bot.action('cancel', async (ctx) => {
   if (ctx.from?.id) pendingLogs.delete(ctx.from.id);
   await ctx.reply('Cancelled weight entry.');
   await ctx.answerCbQuery();
 });
 
-// 5. History Command (/history)
+// 6. History Command (/history)
 bot.command('history', async (ctx) => {
   const today = new Date().toISOString().split('T')[0];
   const lastMonth = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -562,7 +787,75 @@ bot.command('history', async (ctx) => {
   await ctx.reply(result.report || result.message || 'No workout logs found.', { parse_mode: 'Markdown' });
 });
 
-// 6. Text Handler: Logs pending weight OR queries Obsidian Vault via Gemini 3.5 Flash-Lite
+// 7. Photo Handler: Analyzes gym equipment photos via Gemini Vision (gemini-3.5-flash-lite)
+bot.on('photo', async (ctx) => {
+  await ctx.sendChatAction('typing');
+  try {
+    const photos = ctx.message.photo;
+    const largestPhoto = photos[photos.length - 1];
+    const fileLink = await ctx.telegram.getFileLink(largestPhoto.file_id);
+
+    const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(response.data);
+
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+    const tempImagePath = path.join(tempDir, `equip_${Date.now()}.jpg`);
+    fs.writeFileSync(tempImagePath, buffer);
+
+    const imagePart = {
+      inlineData: { data: buffer.toString('base64'), mimeType: 'image/jpeg' }
+    };
+
+    const prompt = `Analyze this gym equipment photo. For each exercise, identify the most viewed tutorial video from top search results on YouTube and provide its direct watch URL (e.g. https://www.youtube.com/watch?v=...). Return ONLY a valid JSON object (no markdown formatting blocks, no extra text) with the following structure:
+{
+  "machineName": "Exact Name of Machine",
+  "category": "Strength / Cardio / Cable / etc.",
+  "exercises": [
+    {
+      "name": "Exercise Name",
+      "muscles": ["Primary Muscle", "Secondary Muscle"],
+      "instructions": "Brief 1-2 sentence execution instructions on how to perform the exercise correctly.",
+      "youtubeUrl": "https://www.youtube.com/watch?v=..."
+    }
+  ]
+}`;
+
+    const aiResponse = await ai.models.generateContent({
+      model: 'gemini-3.5-flash-lite',
+      contents: [imagePart, prompt]
+    });
+
+    const rawText = aiResponse.text?.trim() || '{}';
+    const sanitized = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const firstBrace = sanitized.indexOf('{');
+    const lastBrace = sanitized.lastIndexOf('}');
+    const jsonClean = sanitized.substring(firstBrace, lastBrace + 1);
+
+    const equipmentData = JSON.parse(jsonClean);
+    if (!equipmentData.machineName || !equipmentData.exercises) {
+      throw new Error('Could not parse equipment details from image JSON.');
+    }
+
+    const finalImageName = `${equipmentData.machineName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`;
+    const finalImagePath = path.join(tempDir, finalImageName);
+    fs.renameSync(tempImagePath, finalImagePath);
+
+    const res = await BotController.handleGenerateExercises(
+      finalImagePath,
+      equipmentData.machineName,
+      equipmentData.category || 'Strength',
+      equipmentData.exercises
+    );
+
+    if (fs.existsSync(finalImagePath)) fs.unlinkSync(finalImagePath);
+    await ctx.reply(res.message, { parse_mode: 'Markdown' });
+  } catch (error: any) {
+    await ctx.reply(`❌ Failed to process equipment photo: ${error.message}`);
+  }
+});
+
+// 8. Text Handler
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
@@ -594,6 +887,13 @@ bot.on('text', async (ctx) => {
 });
 
 export function startTelegramBot() {
+  bot.telegram.setMyCommands([
+    { command: 'today', description: "Load today's workout and log weights" },
+    { command: 'plan', description: 'Create a custom weekly workout plan (1–7 days)' },
+    { command: 'history', description: 'View workout logs from the last 30 days' },
+    { command: 'help', description: 'Show available bot commands and examples' }
+  ]).catch(err => console.error('[ERROR Service] Failed to set bot commands menu:', err));
+
   bot.launch();
   console.log('🤖 Fitness Bot Telegram layer active (Local Polling Mode).');
 
@@ -619,13 +919,13 @@ async function seedVault() {
     'Strength / Cable',
     [
       { name: 'Cable Chest Fly', muscles: ['Chest', 'Anterior Deltoids'] },
-      { name: 'Triceps Rope Pushdown', muscles: ['Triceps'] },
+      { name: 'Triceps Pushdown', muscles: ['Triceps'] },
       { name: 'Face Pull', muscles: ['Rear Deltoids', 'Upper Back'] }
     ]
   );
 
   console.log('📅 Creating active weekly workout plan...');
-  const result = BotController.handleCreateWeeklyPlan(3, 1);
+  const result = await BotController.handleCreateWeeklyPlan(3, 1);
   console.log(result.message);
   console.log('✅ Vault seeding completed successfully!');
 }

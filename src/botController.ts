@@ -9,6 +9,20 @@ dotenv.config();
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
+export interface ExerciseMetadata {
+  name: string;
+  muscles: string[];
+  equipment: string;
+  youtubeUrl: string;
+  lastWeight: number | null;
+}
+
+export interface GeneratedPlanDay {
+  day: number;
+  title: string;
+  exercises: ExerciseMetadata[];
+}
+
 export class BotController {
   
   static async handleGenerateExercises(
@@ -48,27 +62,147 @@ export class BotController {
     };
   }
 
-  static handleCreateWeeklyPlan(daysPerWeek: number, hoursPerDay: number) {
+  static getAllExercisesMetadata(): ExerciseMetadata[] {
     const exercisesDir = VaultManager.getFullPath('Exercises');
-    if (!fs.existsSync(exercisesDir)) throw new Error('No exercises found in vault. Add equipment first.');
-    
-    const exerciseFiles = fs.readdirSync(exercisesDir).filter(f => f.endsWith('.md'));
-    
-    let planMarkdown = '';
-    const exercisesPerDay = Math.ceil(exerciseFiles.length / daysPerWeek);
+    if (!fs.existsSync(exercisesDir)) return [];
 
-    for (let d = 1; d <= daysPerWeek; d++) {
-      const dayExercises = exerciseFiles.slice((d - 1) * exercisesPerDay, d * exercisesPerDay);
-      planMarkdown += `## Day ${d}: Session ${d}\n`;
-      dayExercises.forEach((file, idx) => {
-        const exName = file.replace('.md', '');
-        planMarkdown += `${idx + 1}. [[${exName}]] — *Last Weight: Check Exercise Note*\n`;
+    const files = fs.readdirSync(exercisesDir).filter(f => f.endsWith('.md'));
+    return files.map(file => {
+      const exName = file.replace('.md', '');
+      const raw = fs.readFileSync(path.join(exercisesDir, file), 'utf8');
+      const parsed = matter(raw);
+
+      const muscles = Array.isArray(parsed.data.primary_muscles)
+        ? parsed.data.primary_muscles
+        : parsed.data.primary_muscles
+        ? [String(parsed.data.primary_muscles)]
+        : ['General'];
+
+      const equipment = parsed.data.equipment
+        ? String(parsed.data.equipment).replace(/\[\[|\]\]/g, '')
+        : 'Gym Equipment';
+
+      const youtubeUrl = parsed.data.youtube_link && String(parsed.data.youtube_link).startsWith('http')
+        ? String(parsed.data.youtube_link)
+        : `https://www.youtube.com/results?search_query=${encodeURIComponent(exName + ' exercise form')}`;
+
+      const lastWeight = typeof parsed.data.last_weight === 'number' ? parsed.data.last_weight : null;
+
+      return {
+        name: exName,
+        muscles,
+        equipment,
+        youtubeUrl,
+        lastWeight
+      };
+    });
+  }
+
+  static async handleCreateWeeklyPlan(daysPerWeek: number, hoursPerDay: number = 1): Promise<{
+    success: boolean;
+    message: string;
+    days: GeneratedPlanDay[];
+  }> {
+    const allExercises = this.getAllExercisesMetadata();
+    if (allExercises.length === 0) {
+      throw new Error('No exercises found in vault. Add equipment photos first.');
+    }
+
+    // ~6 exercises fits an approximate 1-hour session (including warm-up & rest between sets)
+    const targetExercisesPerDay = Math.max(4, Math.min(6, Math.round(hoursPerDay * 6)));
+
+    const prompt = `You are an expert strength & conditioning coach. Build a ${daysPerWeek}-day weekly workout split where each workout session takes approximately ${hoursPerDay} hour(s) (roughly ${targetExercisesPerDay} exercises per day).
+
+Available Exercises in the user's gym vault:
+${JSON.stringify(allExercises.map(e => ({ name: e.name, muscles: e.muscles, equipment: e.equipment })), null, 2)}
+
+Strict Scheduling Rules:
+1. Maximize muscle recovery: Distribute muscle groups across the ${daysPerWeek} days so each muscle gets the maximum possible rest days between sessions (e.g. Upper/Lower, Push/Pull/Legs, or dedicated body-part splits depending on ${daysPerWeek} days). Never schedule the same primary muscle group on consecutive days unless total exercise variety makes it unavoidable.
+2. Avoid repeating exercises across the week: Use unique exercises across all ${daysPerWeek} days whenever possible. ONLY repeat an exercise if there are not enough distinct exercises in the vault to fill all ${daysPerWeek} sessions (~${targetExercisesPerDay} exercises per session).
+3. Use ONLY exact exercise names from the provided list.
+
+Return ONLY a valid JSON object (no markdown fences, no extra text) with this exact structure:
+{
+  "days": [
+    {
+      "day": 1,
+      "title": "Focus Area (e.g., Chest & Triceps / Upper Body)",
+      "exercises": ["Exact Exercise Name 1", "Exact Exercise Name 2"]
+    }
+  ]
+}`;
+
+    const aiResponse = await ai.models.generateContent({
+      model: 'gemini-3.5-flash-lite',
+      contents: [prompt]
+    });
+
+    const rawText = aiResponse.text?.trim() || '{}';
+    const sanitized = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const firstBrace = sanitized.indexOf('{');
+    const lastBrace = sanitized.lastIndexOf('}');
+    const jsonClean = firstBrace !== -1 && lastBrace !== -1 ? sanitized.substring(firstBrace, lastBrace + 1) : '{}';
+
+    const parsedPlan = JSON.parse(jsonClean);
+    const exerciseMap = new Map(allExercises.map(ex => [ex.name.toLowerCase(), ex]));
+
+    const structuredDays: GeneratedPlanDay[] = [];
+    let planMarkdown = '';
+
+    if (Array.isArray(parsedPlan.days) && parsedPlan.days.length > 0) {
+      for (const dayItem of parsedPlan.days) {
+        const dayNum = Number(dayItem.day) || structuredDays.length + 1;
+        const dayTitle = String(dayItem.title || `Session ${dayNum}`).trim();
+        const dayExercises: ExerciseMetadata[] = [];
+
+        for (const rawName of dayItem.exercises || []) {
+          const found = exerciseMap.get(String(rawName).trim().toLowerCase());
+          if (found) {
+            dayExercises.push(found);
+          }
+        }
+
+        if (dayExercises.length > 0) {
+          structuredDays.push({ day: dayNum, title: dayTitle, exercises: dayExercises });
+        }
+      }
+    }
+
+    // Fallback if AI response failed or returned empty
+    if (structuredDays.length === 0) {
+      const totalNeeded = daysPerWeek * targetExercisesPerDay;
+      const pool: ExerciseMetadata[] = [];
+      while (pool.length < totalNeeded) {
+        pool.push(...allExercises);
+      }
+      for (let d = 1; d <= daysPerWeek; d++) {
+        const slice = pool.slice((d - 1) * targetExercisesPerDay, d * targetExercisesPerDay);
+        structuredDays.push({
+          day: d,
+          title: `Session ${d}`,
+          exercises: slice
+        });
+      }
+    }
+
+    for (const d of structuredDays) {
+      planMarkdown += `## Day ${d.day}: ${d.title}
+`;
+      d.exercises.forEach((ex, idx) => {
+        planMarkdown += `${idx + 1}. [[${ex.name}]] (${ex.muscles.join(', ')}) — [Video Guide](${ex.youtubeUrl})
+`;
       });
-      planMarkdown += `\n`;
+      planMarkdown += `
+`;
     }
 
     VaultManager.saveWeeklyPlan(daysPerWeek, hoursPerDay, planMarkdown);
-    return { success: true, message: `Created a ${daysPerWeek}-day weekly plan (${hoursPerDay}h/day).` };
+
+    return {
+      success: true,
+      message: `Created a ${daysPerWeek}-day weekly plan (~${hoursPerDay}h/session) optimized for muscle recovery.`,
+      days: structuredDays
+    };
   }
 
   static handleTodaysPlan() {

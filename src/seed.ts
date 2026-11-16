@@ -20,7 +20,7 @@ async function seedVault() {
 
   // 2. Create a 3-day weekly plan
   console.log('📅 Creating active weekly workout plan...');
-  const result = BotController.handleCreateWeeklyPlan(3, 1);
+  const result = await BotController.handleCreateWeeklyPlan(3, 1);
   console.log(result.message);
   console.log('✅ Vault seeding completed successfully!');
 }

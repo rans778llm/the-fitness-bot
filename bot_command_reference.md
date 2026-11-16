@@ -1,5 +1,11 @@
 # Bot Command & Action Reference
 
+* `/help`
+  * *Explanation:* Displays all available bot commands and supported actions along with a one-line usage example for each.
+
+* `/plan`
+  * *Explanation:* Prompts you to select how many training days per week you want (1 to 7 days, ~1h/session) and generates a muscle-recovery-optimized weekly split with direct YouTube tutorial links.
+
 * `/today`
   * *Explanation:* Loads today's scheduled workout session from your active plan, displays previous weight telemetry, and generates interactive logging buttons.
 

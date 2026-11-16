@@ -29,7 +29,100 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
-// 1. Today's Workout Command (/today)
+// 0. Help Command (/help)
+bot.command('help', async (ctx) => {
+  console.log(`[DEBUG Service] Received /help command from user ${ctx.from?.id}`);
+  const helpMessage = `🤖 **Fitness Bot — Commands & Actions**
+
+• **Load Today's Workout** — Loads today's scheduled exercises and opens interactive buttons to log weights.
+  Example: \`/today\`
+
+• **Create Weekly Plan** — Choose 1–7 training days/week (~1h/session) to generate a muscle-recovery split with YouTube tutorial links.
+  Example: \`/plan\`
+
+• **View Workout History** — Displays all logged workouts from the last 30 days.
+  Example: \`/history\`
+
+• **Add Gym Equipment (Photo)** — Send a photo of any gym machine to identify it and auto-generate exercise notes & video links.
+  Example: *[Attach & send a photo of a gym machine]*
+
+• **Log Exercise Weight** — Tap an exercise button from \`/today\`, then reply with your weight in kg (or tap *Repeat Last*).
+  Example: \`22.5\`
+
+• **Ask Your Fitness Vault (AI)** — Send any free-text question to query your workout history, weights, and routines.
+  Example: \`What was my last weight on Cable Chest Fly?\`
+
+• **Show Help** — Displays this command reference guide.
+  Example: \`/help\``;
+
+  await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
+});
+
+// 1. Plan Creation Command (/plan) — Interactive day-count selection (1 to 7 days/week)
+bot.command('plan', async (ctx) => {
+  console.log(`[DEBUG Service] Received /plan command from user ${ctx.from?.id}`);
+  const dayButtons = [1, 2, 3, 4, 5, 6, 7].map(days =>
+    Markup.button.callback(`${days} ${days === 1 ? 'Day' : 'Days'}`, `create_plan|${days}`)
+  );
+
+  await ctx.reply(
+    `📅 **Create Weekly Workout Plan**\nHow many days per week do you want to train? (~1 hour per session):`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(dayButtons, { columns: 4 })
+    }
+  );
+});
+
+// 1b. Handle Plan Day-Count Selection
+bot.action(/^create_plan\|([1-7])$/, async (ctx) => {
+  const daysPerWeek = parseInt(ctx.match[1], 10);
+  console.log(`[DEBUG Service] Generating ${daysPerWeek}-day weekly plan for user ${ctx.from?.id}`);
+
+  await ctx.answerCbQuery(`Building ${daysPerWeek}-day plan...`);
+  await ctx.sendChatAction('typing');
+
+  try {
+    const result = await BotController.handleCreateWeeklyPlan(daysPerWeek, 1);
+
+    let output = `📅 **${daysPerWeek}-Day Weekly Workout Plan (~1h / session)**\n_Muscles distributed for maximum recovery between sessions._\n\n`;
+    for (const day of result.days) {
+      output += `*Day ${day.day}: ${day.title}*\n`;
+      day.exercises.forEach((ex, idx) => {
+        output += `${idx + 1}. [${ex.name}](${ex.youtubeUrl}) _(${ex.muscles.join(', ')})_\n`;
+      });
+      output += `\n`;
+    }
+
+    // Telegram message limit is 4096 chars; split cleanly if needed
+    if (output.length <= 4000) {
+      await ctx.reply(output, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true }
+      });
+    } else {
+      await ctx.reply(
+        `📅 **${daysPerWeek}-Day Weekly Workout Plan (~1h / session)**\n_Muscles distributed for maximum recovery between sessions._`,
+        { parse_mode: 'Markdown' }
+      );
+      for (const day of result.days) {
+        let dayMsg = `*Day ${day.day}: ${day.title}*\n`;
+        day.exercises.forEach((ex, idx) => {
+          dayMsg += `${idx + 1}. [${ex.name}](${ex.youtubeUrl}) _(${ex.muscles.join(', ')})_\n`;
+        });
+        await ctx.reply(dayMsg, {
+          parse_mode: 'Markdown',
+          link_preview_options: { is_disabled: true }
+        });
+      }
+    }
+  } catch (error: any) {
+    console.error(`[ERROR Service] create_plan error:`, error);
+    await ctx.reply(`❌ Error creating plan: ${error.message}`);
+  }
+});
+
+// 2. Today's Workout Command (/today)
 bot.command('today', async (ctx) => {
   console.log(`[DEBUG Service] Received /today command from user ${ctx.from?.id}`);
   try {
@@ -42,6 +135,7 @@ bot.command('today', async (ctx) => {
       )
     );
 
+    // Send a message to the user with an inline keyboard containing exercise buttons for logging weight
     await ctx.reply(
       `📋 **Day ${session.dayIndex} Workout**\nSelect an exercise to log your weight:`,
       {
@@ -50,12 +144,13 @@ bot.command('today', async (ctx) => {
       }
     );
   } catch (error: any) {
+    // Log the error and notify the user if something goes wrong
     console.error(`[ERROR Service] /today error:`, error);
     await ctx.reply(`❌ Error: ${error.message}`);
   }
 });
 
-// 2. Tap an Exercise Button
+// 3. Tap an Exercise Button
 bot.action(/^log\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   const [, logFileName, indexStr, exerciseName] = ctx.match;
   const exerciseNumber = parseInt(indexStr, 10);
@@ -78,7 +173,7 @@ bot.action(/^log\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
 });
 
-// 3. Repeat Last Weight Action
+// 4. Repeat Last Weight Action
 bot.action(/^repeat\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   const [, logFileName, indexStr, exerciseName] = ctx.match;
   const exerciseNumber = parseInt(indexStr, 10);
@@ -99,14 +194,14 @@ bot.action(/^repeat\|([^|]+)\|(\d+)\|(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
 });
 
-// 4. Cancel Action
+// 5. Cancel Action
 bot.action('cancel', async (ctx) => {
   if (ctx.from?.id) pendingLogs.delete(ctx.from.id);
   await ctx.reply('Cancelled weight entry.');
   await ctx.answerCbQuery();
 });
 
-// 5. History Command (/history)
+// 6. History Command (/history)
 bot.command('history', async (ctx) => {
   console.log(`[DEBUG Service] Received /history command`);
   const today = new Date().toISOString().split('T')[0];
@@ -116,7 +211,7 @@ bot.command('history', async (ctx) => {
   await ctx.reply(result.report || result.message || 'No workout logs found.', { parse_mode: 'Markdown' });
 });
 
-// 6. Photo Handler: Analyzes gym equipment photos via Gemini Vision (gemini-3.5-flash-lite)
+// 7. Photo Handler: Analyzes gym equipment photos via Gemini Vision (gemini-3.5-flash-lite)
 bot.on('photo', async (ctx) => {
   console.log(`[DEBUG Service] 📸 PHOTO EVENT RECEIVED from user ID: ${ctx.from?.id}`);
   await ctx.sendChatAction('typing');
@@ -206,7 +301,7 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// 7. Text Handler
+// 8. Text Handler
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
@@ -238,6 +333,13 @@ bot.on('text', async (ctx) => {
 });
 
 export function startTelegramBot() {
+  bot.telegram.setMyCommands([
+    { command: 'today', description: "Load today's workout and log weights" },
+    { command: 'plan', description: 'Create a custom weekly workout plan (1–7 days)' },
+    { command: 'history', description: 'View workout logs from the last 30 days' },
+    { command: 'help', description: 'Show available bot commands and examples' }
+  ]).catch(err => console.error('[ERROR Service] Failed to set bot commands menu:', err));
+
   bot.launch();
   console.log('🤖 Fitness Bot Telegram layer active (Local Polling Mode with Debug Logging).');
 
