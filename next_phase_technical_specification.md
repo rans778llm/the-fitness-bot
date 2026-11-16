@@ -13,7 +13,7 @@ This document outlines the migration path of the personal fitness assistant from
 To keep deployment and maintenance completely **free** (with a one-time Google Play Console developer registration fee of $25 being the only exception):
 
 * **AI & Vision Inference (`gemini-3.5-flash-lite`):** Utilizes Google AI Studio’s generous free tier limits for developers, calling the Gemini API directly from the client or via a free-tier serverless proxy if required.
-* **Backend / Database Hosting:** **Zero backend servers required.** The app operates entirely locally on the user's device using an offline-first architecture. 
+* **Backend / Database Hosting:** **Zero backend servers required.** The app operates entirely locally on the device using an offline-first architecture. 
 * **Source Control & CI/CD:** **GitHub Actions** (Free for public/private repositories) to automatically build, lint, and sign release APKs/App Bundles.
 * **App Distribution:** **Google Play Console** (One-time $25 lifetime developer account fee). Alternative sideloading via GitHub Releases is completely free.
 
